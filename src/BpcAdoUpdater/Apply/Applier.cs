@@ -19,16 +19,11 @@ public sealed class Applier
         int maxUpdateConcurrency = 8,
         Action<int, int, string>? onProgress = null)
     {
-        Dictionary<string, int> workItemTypeOrder = BuildWorkItemTypeOrder(config);
         Dictionary<string, string> microsoftIdBySequence = BuildMicrosoftIdBySequence(changeSet);
 
-        List<Change> approvedAdds = changeSet.ApprovedChanges
-            .Where(x => x.Kind == ChangeKind.Add)
-            .OrderBy(x => GetWorkItemTypeRank(config, workItemTypeOrder, x.Row.WorkItemType))
-            .ThenBy(x => BpcAdoUpdater.Models.ProcessSequenceHierarchy.GetDepth(x.Row.ProcessSequenceId))
-            .ThenBy(x => x.Row.ProcessSequenceId, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(x => x.Row.RowNumber)
-            .ToList();
+        List<Change> approvedAdds = OrderAdds(
+            changeSet.ApprovedChanges.Where(x => x.Kind == ChangeKind.Add),
+            config);
 
         List<Change> approvedUpdates = changeSet.ApprovedChanges
             .Where(x => x.Kind == ChangeKind.Update)
@@ -196,7 +191,7 @@ public sealed class Applier
         await Task.WhenAll(updateTasks);
     }
 
-    private static JsonPatchDocument BuildPatch(
+    internal static JsonPatchDocument BuildPatch(
         Change change,
         AppConfig config,
         IReadOnlyDictionary<string, AdoWorkItemRecord> index,
@@ -218,6 +213,15 @@ public sealed class Applier
 
         foreach (FieldDelta delta in change.Deltas)
         {
+            bool isAreaPath = delta.CsvFieldName.Equals("Area Path", StringComparison.OrdinalIgnoreCase)
+                || delta.AdoFieldName.Equals("System.AreaPath", StringComparison.OrdinalIgnoreCase);
+            bool isIterationPath = delta.CsvFieldName.Equals("Iteration path", StringComparison.OrdinalIgnoreCase)
+                || delta.AdoFieldName.Equals("System.IterationPath", StringComparison.OrdinalIgnoreCase);
+            if (isAreaPath || isIterationPath)
+            {
+                continue;
+            }
+
             if (touchedFields.Contains(delta.AdoFieldName))
             {
                 continue;
@@ -253,25 +257,21 @@ public sealed class Applier
 
         if (change.Kind == ChangeKind.Add)
         {
-            if (!touchedFields.Contains("System.AreaPath"))
+            patch.Add(new JsonPatchOperation
             {
-                patch.Add(new JsonPatchOperation
-                {
-                    Operation = Operation.Add,
-                    Path = "/fields/System.AreaPath",
-                    Value = change.Row.AreaPath ?? config.AreaPathRoot,
-                });
-            }
+                Operation = Operation.Add,
+                Path = "/fields/System.AreaPath",
+                Value = config.AreaPathRoot,
+            });
 
-            if (!touchedFields.Contains("System.IterationPath"))
+            patch.Add(new JsonPatchOperation
             {
-                patch.Add(new JsonPatchOperation
-                {
-                    Operation = Operation.Add,
-                    Path = "/fields/System.IterationPath",
-                    Value = change.Row.IterationPath ?? config.DefaultIterationPath ?? config.AreaPathRoot,
-                });
-            }
+                Operation = Operation.Add,
+                Path = "/fields/System.IterationPath",
+                Value = string.IsNullOrWhiteSpace(config.DefaultIterationPath)
+                    ? config.AreaPathRoot
+                    : config.DefaultIterationPath,
+            });
 
             TryAddParentLink(change, config.OrganizationUrl, index, microsoftIdBySequence, patch);
         }
@@ -308,7 +308,8 @@ public sealed class Applier
 
         if (parent is null)
         {
-            return;
+            throw new InvalidOperationException(
+                $"Cannot create Microsoft ID '{change.MicrosoftId}' because parent process sequence '{parentProcessSequence}' was not found in ADO or among earlier approved additions.");
         }
 
         patch.Add(new JsonPatchOperation
@@ -340,6 +341,17 @@ public sealed class Applier
         }
 
         return order;
+    }
+
+    public static List<Change> OrderAdds(IEnumerable<Change> additions, AppConfig config)
+    {
+        Dictionary<string, int> workItemTypeOrder = BuildWorkItemTypeOrder(config);
+        return additions
+            .OrderBy(x => ProcessSequenceHierarchy.GetDepth(x.Row.ProcessSequenceId))
+            .ThenBy(x => GetWorkItemTypeRank(config, workItemTypeOrder, x.Row.WorkItemType))
+            .ThenBy(x => x.Row.ProcessSequenceId, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(x => x.Row.RowNumber)
+            .ToList();
     }
 
     private static int GetWorkItemTypeRank(

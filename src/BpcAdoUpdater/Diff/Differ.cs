@@ -124,6 +124,12 @@ public sealed class Differ
 
         foreach ((string csvField, string adoField) in fieldMap)
         {
+            if (csvField.Equals("Area Path", StringComparison.OrdinalIgnoreCase)
+                || csvField.Equals("Iteration path", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             csvFields.TryGetValue(csvField, out string? csvValue);
             existing.Fields.TryGetValue(adoField, out string? rawOld);
 

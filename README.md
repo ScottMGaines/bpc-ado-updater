@@ -10,7 +10,7 @@ The tool:
 - supports an interactive main menu (review, apply, quit)
 - supports decision plan files for safe two-step review/apply
 - supports dry-run mode and optional backup export
-- writes a JSON run log for traceability
+- writes a JSON run log and stage-level diagnostic log for traceability
 
 ## Quick Start (5 Minutes)
 
@@ -40,7 +40,10 @@ Optional fallback for testing: set Ado:Pat in appsettings.json.
 - Ado:Project
 - Ado:AreaPathRoot
 - Ado:Pat (optional testing fallback)
+- CsvColumnMap entries if the source CSV headers differ from the canonical names
+- IgnoredApplications for exact Application family values to exclude
 - FieldMap entries for your ADO process
+- WorkItemTypeMap entries for CSV types to compare and their ADO types
 
 5. Run interactive flow with backup (review + apply from same run):
 
@@ -81,7 +84,7 @@ Use this when Microsoft releases a new catalog file (for example, Business Proce
 
 ## Prerequisites
 
-1. Windows with .NET SDK 8 installed.
+1. Windows with .NET SDK 10 installed.
 2. Existing Azure DevOps project that already contains the Business Process Catalog structure.
 3. A Personal Access Token (PAT) with work item read/write permissions.
 4. Correct field reference names in your process template (configured in appsettings.json).
@@ -132,18 +135,44 @@ dotnet test BpcAdoUpdater.sln -c Debug
 
 ## Configuration Reference (appsettings.json)
 
+### CsvColumnMap section
+
+Maps canonical loader column names to the actual source CSV headers. The key is the name expected by the application; the value is the exact header in the file. Unconfigured columns use their canonical names. For example, the OCT 2026 file uses `Microsoft ID MS BPC`:
+
+```json
+"CsvColumnMap": {
+	"Microsoft ID": "Microsoft ID MS BPC",
+	"Catalog status": "Catalog status MS BPC",
+	"Software development solutions": "Software solutions MS BPC"
+}
+```
+
+The example settings include the aliases for the OCT 2026 catalog. Update these aliases if a future CSV release changes its headings.
+
+### IgnoredApplications section
+
+An optional list of exact `Application family` cell values to exclude from comparison and apply:
+
+```json
+"IgnoredApplications": [
+	"Business Central"
+]
+```
+
+Matching is case-sensitive after trimming outer whitespace, and compares the entire cell. A combined value such as `Business Central, Supply Chain` is not ignored by an entry of `Business Central`.
+
 ### Ado section
 
 - OrganizationUrl: Azure DevOps org URL (for example https://dev.azure.com/your-org)
 - Project: target project name
-- AreaPathRoot: root area path to query/update under
-- DefaultIterationPath: fallback iteration path for newly created items
+- AreaPathRoot: root area path to query/update under and the area path assigned to new work items
+- DefaultIterationPath: iteration path assigned to new work items; if blank, AreaPathRoot is used
 - PatEnvironmentVariableName: env var name used to read PAT
 - Pat: optional fallback PAT in config (used only when env var is empty)
 
 ### FieldMap section
 
-Maps CSV column names to Azure DevOps field reference names.
+Maps canonical CSV field names to Azure DevOps field reference names. This is separate from `CsvColumnMap`, which handles raw source CSV headers.
 
 Examples:
 - Microsoft ID -> Custom.MicrosoftID
@@ -164,6 +193,7 @@ Example:
 - Scenario -> User Story
 
 Note: add operations are ordered by mapped work item type order and hierarchy depth so parents are created before children.
+Only CSV rows whose `Work item type` appears as a key in `WorkItemTypeMap` are compared or applied. Unmapped types are counted and shown as ignored; for example, an unmapped `Test case` row is skipped. The mapped value is the ADO work item type used when creating a new item. Existing items are matched by Microsoft ID.
 
 ### DefaultsWhenCsvNull section
 
@@ -252,10 +282,16 @@ Interactive mode note:
 ## Behavior Rules Implemented
 
 - Strict matching key: Microsoft ID only
+- Rows with work item types absent from `WorkItemTypeMap` are ignored before comparison
+- Rows whose complete `Application family` cell exactly matches `IgnoredApplications` are ignored
+- Title hierarchy columns `Title 1` through `Title 8` are loaded; the deepest populated title is used as the work item title
 - Existing row changed: update only mapped fields that differ
+- Existing work item Area Paths and Iteration paths are never updated from the CSV
+- New work items always use `Ado:AreaPathRoot` and `Ado:DefaultIterationPath`; the CSV Area Path and Iteration path do not override these configured values
 - Missing row in ADO: create new work item
-- Adds are ordered parent-first by WorkItemTypeMap order and process sequence depth
-- Parent links for adds are resolved from process sequence hierarchy and CSV Microsoft ID mapping
+- Adds are reviewed and applied in the same parent-first order: process-sequence depth, mapped work-item type as a tie-breaker, then sequence ID
+- Parent links for adds are resolved from the process-sequence hierarchy and CSV Microsoft ID mapping, preserving sequence segment zero-padding
+- A child add fails rather than being created without its expected parent when the parent cannot be found
 - Deprecated/Deleted catalog rows: diff flow limits to Catalog status update handling
 - Rows in ADO but not in CSV: informational only, no delete
 - Description comparison normalizes whitespace and HTML/entity formatting to reduce false positives
@@ -274,6 +310,10 @@ It records:
 - success/failure
 - message/error
 - field deltas
+
+### Diagnostic log
+
+A JSON Lines diagnostic log is written to `artifacts/run-logs/diagnostics-*.jsonl` as the run progresses, including when you quit from the review menu. It records stage timestamps, CSV accepted/skipped row counts, rows ignored by application and work item type filters, ADO query/index counts, comparison totals, and update counts by field name. It excludes CSV field values, Microsoft IDs, ADO item IDs, and credentials. Diagnostic logs are cleared at the start of the next run.
 
 Note: artifacts/run-logs and artifacts/backups are cleared at the start of each run.
 

@@ -13,6 +13,9 @@ public sealed class CatalogRow
     public string? Title3 { get; init; }
     public string? Title4 { get; init; }
     public string? Title5 { get; init; }
+    public string? Title6 { get; init; }
+    public string? Title7 { get; init; }
+    public string? Title8 { get; init; }
     public string? State { get; init; }
     public string? AreaPath { get; init; }
     public string? IterationPath { get; init; }
@@ -38,8 +41,8 @@ public sealed class CatalogRow
     public string? GapSolutionApproach { get; init; }
 
     public string? EffectiveTitle =>
-        FirstNonEmpty(Title5, Title4, Title3, Title2, Title1) ??
-        FirstNonEmpty(Title1, Title2, Title3, Title4, Title5);
+        FirstNonEmpty(Title8, Title7, Title6, Title5, Title4, Title3, Title2, Title1) ??
+        FirstNonEmpty(Title1, Title2, Title3, Title4, Title5, Title6, Title7, Title8);
 
     public int TitleDepth
     {
@@ -50,6 +53,9 @@ public sealed class CatalogRow
             if (!string.IsNullOrWhiteSpace(Title3)) return 3;
             if (!string.IsNullOrWhiteSpace(Title4)) return 4;
             if (!string.IsNullOrWhiteSpace(Title5)) return 5;
+            if (!string.IsNullOrWhiteSpace(Title6)) return 6;
+            if (!string.IsNullOrWhiteSpace(Title7)) return 7;
+            if (!string.IsNullOrWhiteSpace(Title8)) return 8;
             return 0;
         }
     }
@@ -68,6 +74,9 @@ public sealed class CatalogRow
         ["Title 3"] = Title3,
         ["Title 4"] = Title4,
         ["Title 5"] = Title5,
+        ["Title 6"] = Title6,
+        ["Title 7"] = Title7,
+        ["Title 8"] = Title8,
         ["State"] = State,
         ["Area Path"] = AreaPath,
         ["Iteration path"] = IterationPath,

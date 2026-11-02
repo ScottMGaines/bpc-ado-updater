@@ -10,6 +10,8 @@ public sealed class AppConfig
     public string? DefaultIterationPath { get; init; }
     public required string PatEnvironmentVariableName { get; init; }
     public string? Pat { get; init; }
+    public required List<string> IgnoredApplications { get; init; }
+    public required Dictionary<string, string> CsvColumnMap { get; init; }
     public required Dictionary<string, string> FieldMap { get; init; }
     public required Dictionary<string, string> WorkItemTypeMap { get; init; }
     public required Dictionary<string, string> DefaultsWhenCsvNull { get; init; }
@@ -24,6 +26,8 @@ public sealed class AppConfig
             DefaultIterationPath = configuration["Ado:DefaultIterationPath"],
             PatEnvironmentVariableName = configuration["Ado:PatEnvironmentVariableName"] ?? "ADO_PAT",
             Pat = configuration["Ado:Pat"],
+            IgnoredApplications = ReadList(configuration.GetSection("IgnoredApplications")),
+            CsvColumnMap = ReadMap(configuration.GetSection("CsvColumnMap")),
             FieldMap = ReadMap(configuration.GetSection("FieldMap")),
             WorkItemTypeMap = ReadMap(configuration.GetSection("WorkItemTypeMap")),
             DefaultsWhenCsvNull = ReadMap(configuration.GetSection("DefaultsWhenCsvNull")),
@@ -53,16 +57,41 @@ public sealed class AppConfig
             $"PAT was not found in environment variable '{PatEnvironmentVariableName}' and Ado:Pat is empty.");
     }
 
+    public bool TryResolveWorkItemType(string? csvWorkItemType, out string adoWorkItemType)
+    {
+        if (!string.IsNullOrWhiteSpace(csvWorkItemType)
+            && WorkItemTypeMap.TryGetValue(csvWorkItemType, out string? mapped))
+        {
+            adoWorkItemType = mapped;
+            return true;
+        }
+
+        adoWorkItemType = string.Empty;
+        return false;
+    }
+
     public string ResolveWorkItemType(string? csvWorkItemType)
     {
-        if (!string.IsNullOrWhiteSpace(csvWorkItemType) && WorkItemTypeMap.TryGetValue(csvWorkItemType, out string? mapped))
+        if (TryResolveWorkItemType(csvWorkItemType, out string adoWorkItemType))
         {
-            return mapped;
+            return adoWorkItemType;
         }
 
         return string.IsNullOrWhiteSpace(csvWorkItemType)
             ? throw new InvalidOperationException("Row has no work item type.")
-            : csvWorkItemType;
+            : throw new InvalidOperationException($"Work item type '{csvWorkItemType}' is not mapped in WorkItemTypeMap.");
+    }
+
+    public bool ShouldIgnoreApplication(string? applicationFamily)
+    {
+        if (string.IsNullOrWhiteSpace(applicationFamily))
+        {
+            return false;
+        }
+
+        string normalizedApplicationFamily = applicationFamily.Trim();
+        return IgnoredApplications.Any(application =>
+            string.Equals(application.Trim(), normalizedApplicationFamily, StringComparison.Ordinal));
     }
 
     private void Validate()
@@ -91,4 +120,10 @@ public sealed class AppConfig
 
         return map;
     }
+
+    private static List<string> ReadList(IConfigurationSection section) => section.GetChildren()
+        .Select(child => child.Value?.Trim())
+        .Where(value => !string.IsNullOrWhiteSpace(value))
+        .Select(value => value!)
+        .ToList();
 }

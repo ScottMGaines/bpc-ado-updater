@@ -31,10 +31,10 @@ public static class ProcessSequenceHierarchy
         }
 
         string[] parentParts = (string[])parts.Clone();
-        parentParts[nonZeroIndex] = "000";
+        parentParts[nonZeroIndex] = new string('0', parts[nonZeroIndex].Length);
         for (int i = nonZeroIndex + 1; i < parentParts.Length; i++)
         {
-            parentParts[i] = "000";
+            parentParts[i] = new string('0', parts[i].Length);
         }
 
         string parent = string.Join('.', parentParts);

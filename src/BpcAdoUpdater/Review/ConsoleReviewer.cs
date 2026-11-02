@@ -46,14 +46,18 @@ public sealed class ConsoleReviewer
 
     public void Review(ChangeSet changeSet)
     {
-        Review(changeSet, _ => true, "All Changes");
+        Review(changeSet.Changes, "All Changes");
     }
 
     public void Review(ChangeSet changeSet, Func<Change, bool> filter, string sectionName)
     {
-        var reviewable = changeSet.Changes
+        Review(changeSet.Changes.Where(filter), sectionName);
+    }
+
+    public void Review(IEnumerable<Change> changes, string sectionName)
+    {
+        var reviewable = changes
             .Where(x => x.Kind is ChangeKind.Add or ChangeKind.Update)
-            .Where(filter)
             .ToList();
         bool compactAddView = sectionName.Equals("Adds", StringComparison.OrdinalIgnoreCase);
 
@@ -133,6 +137,9 @@ public sealed class ConsoleReviewer
         string warningLine = change.IsCustomerModified
             ? "\n[red]Customer-modified row: incoming values may overwrite customizations.[/]"
             : string.Empty;
+        string workItemTypeLine = compactAddView && change.Kind == ChangeKind.Add
+            ? $"[bold]Work item type[/]: {Markup.Escape(change.Row.WorkItemType ?? "(unknown)")}\n"
+            : string.Empty;
         int completed = Math.Max(0, index - 1);
 
         AnsiConsole.Write(new Panel(BuildProgressMarkup(index, total, completed))
@@ -141,6 +148,7 @@ public sealed class ConsoleReviewer
         AnsiConsole.Write(new Panel(
             $"[bold]Kind[/]: [{kindColor}]{change.Kind}[/]\n" +
             $"[bold]Microsoft ID[/]: [deepskyblue2]{change.MicrosoftId.EscapeMarkup()}[/]\n" +
+            workItemTypeLine +
             $"[bold]Title[/]: {title.EscapeMarkup()}" +
             warningLine)
             .Border(BoxBorder.Rounded)

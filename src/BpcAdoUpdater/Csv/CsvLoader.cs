@@ -7,7 +7,11 @@ namespace BpcAdoUpdater.Csv;
 
 public sealed class CsvLoader
 {
-    public IReadOnlyList<CatalogRow> Load(string csvPath)
+    public IReadOnlyList<CatalogRow> Load(string csvPath) => LoadWithDiagnostics(csvPath).Rows;
+
+    public CsvLoadResult LoadWithDiagnostics(
+        string csvPath,
+        IReadOnlyDictionary<string, string>? csvColumnMap = null)
     {
         if (!File.Exists(csvPath))
         {
@@ -15,6 +19,10 @@ public sealed class CsvLoader
         }
 
         var rows = new List<CatalogRow>();
+    int sourceRecordCount = 0;
+    int skippedRowCount = 0;
+    int missingMicrosoftIdCount = 0;
+    int missingWorkItemTypeCount = 0;
         using var reader = new StreamReader(csvPath);
         var csvConfig = new CsvConfiguration(CultureInfo.InvariantCulture)
         {
@@ -26,14 +34,28 @@ public sealed class CsvLoader
         };
 
         using var csv = new CsvReader(reader, csvConfig);
-        csv.Context.RegisterClassMap<CatalogRowMap>();
+        csv.Context.RegisterClassMap(new CatalogRowMap(csvColumnMap ?? new Dictionary<string, string>()));
 
         int rowNumber = 1;
         foreach (CatalogRowRaw raw in csv.GetRecords<CatalogRowRaw>())
         {
+            sourceRecordCount++;
             rowNumber++;
-            if (string.IsNullOrWhiteSpace(raw.MicrosoftId) || string.IsNullOrWhiteSpace(raw.WorkItemType))
+            bool missingMicrosoftId = string.IsNullOrWhiteSpace(raw.MicrosoftId);
+            bool missingWorkItemType = string.IsNullOrWhiteSpace(raw.WorkItemType);
+            if (missingMicrosoftId || missingWorkItemType)
             {
+                skippedRowCount++;
+                if (missingMicrosoftId)
+                {
+                    missingMicrosoftIdCount++;
+                }
+
+                if (missingWorkItemType)
+                {
+                    missingWorkItemTypeCount++;
+                }
+
                 continue;
             }
 
@@ -50,6 +72,9 @@ public sealed class CsvLoader
                 Title3 = Normalize(raw.Title3),
                 Title4 = Normalize(raw.Title4),
                 Title5 = Normalize(raw.Title5),
+                Title6 = Normalize(raw.Title6),
+                Title7 = Normalize(raw.Title7),
+                Title8 = Normalize(raw.Title8),
                 State = Normalize(raw.State),
                 AreaPath = Normalize(raw.AreaPath),
                 IterationPath = Normalize(raw.IterationPath),
@@ -76,7 +101,12 @@ public sealed class CsvLoader
             });
         }
 
-        return rows;
+        return new CsvLoadResult(
+            rows,
+            sourceRecordCount,
+            skippedRowCount,
+            missingMicrosoftIdCount,
+            missingWorkItemTypeCount);
     }
 
     private static string? Normalize(string? value)
@@ -101,6 +131,9 @@ public sealed class CsvLoader
         public string? Title3 { get; set; }
         public string? Title4 { get; set; }
         public string? Title5 { get; set; }
+        public string? Title6 { get; set; }
+        public string? Title7 { get; set; }
+        public string? Title8 { get; set; }
         public string? State { get; set; }
         public string? AreaPath { get; set; }
         public string? IterationPath { get; set; }
@@ -128,41 +161,56 @@ public sealed class CsvLoader
 
     private sealed class CatalogRowMap : ClassMap<CatalogRowRaw>
     {
-        public CatalogRowMap()
+        public CatalogRowMap(IReadOnlyDictionary<string, string> csvColumnMap)
         {
-            Map(x => x.Id).Name("ID");
-            Map(x => x.ProcessSequenceId).Name("Process sequence ID");
-            Map(x => x.AlternateProcessSequenceId).Name("Alternate process sequence ID");
-            Map(x => x.MicrosoftId).Name("Microsoft ID");
-            Map(x => x.WorkItemType).Name("Work item type");
-            Map(x => x.Title1).Name("Title 1");
-            Map(x => x.Title2).Name("Title 2");
-            Map(x => x.Title3).Name("Title 3");
-            Map(x => x.Title4).Name("Title 4");
-            Map(x => x.Title5).Name("Title 5");
-            Map(x => x.State).Name("State");
-            Map(x => x.AreaPath).Name("Area Path");
-            Map(x => x.IterationPath).Name("Iteration path");
-            Map(x => x.Description).Name("Description");
-            Map(x => x.CatalogStatus).Name("Catalog status");
-            Map(x => x.ArticleStatus).Name("Article status");
-            Map(x => x.Author).Name("Author");
-            Map(x => x.BusinessProcessFlowStatus).Name("Business process flow status");
-            Map(x => x.MicrosoftReferences).Name("Microsoft references");
-            Map(x => x.PartnerReferences).Name("Partner references");
-            Map(x => x.UpdateComments).Name("Update comments");
-            Map(x => x.ApplicationFamily).Name("Application family");
-            Map(x => x.Products).Name("Products");
-            Map(x => x.SoftwareDevelopmentCompany).Name("Software development company");
-            Map(x => x.SoftwareDevelopmentSolutions).Name("Software development solutions");
-            Map(x => x.Module).Name("Module");
-            Map(x => x.MenuPath).Name("Menu path");
-            Map(x => x.MenuItemName).Name("Menu item name");
-            Map(x => x.ApqcId).Name("APQC ID");
-            Map(x => x.ApqcDescription).Name("APQC description");
-            Map(x => x.Scope).Name("Scope");
-            Map(x => x.FitGapStatus).Name("Fit Gap Status");
-            Map(x => x.GapSolutionApproach).Name("Gap solution approach");
+            Map(x => x.Id).Name(GetHeaderNames("ID", csvColumnMap));
+            Map(x => x.ProcessSequenceId).Name(GetHeaderNames("Process sequence ID", csvColumnMap));
+            Map(x => x.AlternateProcessSequenceId).Name(GetHeaderNames("Alternate process sequence ID", csvColumnMap));
+            Map(x => x.MicrosoftId).Name(GetHeaderNames("Microsoft ID", csvColumnMap));
+            Map(x => x.WorkItemType).Name(GetHeaderNames("Work item type", csvColumnMap));
+            Map(x => x.Title1).Name(GetHeaderNames("Title 1", csvColumnMap));
+            Map(x => x.Title2).Name(GetHeaderNames("Title 2", csvColumnMap));
+            Map(x => x.Title3).Name(GetHeaderNames("Title 3", csvColumnMap));
+            Map(x => x.Title4).Name(GetHeaderNames("Title 4", csvColumnMap));
+            Map(x => x.Title5).Name(GetHeaderNames("Title 5", csvColumnMap));
+            Map(x => x.Title6).Name(GetHeaderNames("Title 6", csvColumnMap));
+            Map(x => x.Title7).Name(GetHeaderNames("Title 7", csvColumnMap));
+            Map(x => x.Title8).Name(GetHeaderNames("Title 8", csvColumnMap));
+            Map(x => x.State).Name(GetHeaderNames("State", csvColumnMap));
+            Map(x => x.AreaPath).Name(GetHeaderNames("Area Path", csvColumnMap));
+            Map(x => x.IterationPath).Name(GetHeaderNames("Iteration path", csvColumnMap));
+            Map(x => x.Description).Name(GetHeaderNames("Description", csvColumnMap));
+            Map(x => x.CatalogStatus).Name(GetHeaderNames("Catalog status", csvColumnMap));
+            Map(x => x.ArticleStatus).Name(GetHeaderNames("Article status", csvColumnMap));
+            Map(x => x.Author).Name(GetHeaderNames("Author", csvColumnMap));
+            Map(x => x.BusinessProcessFlowStatus).Name(GetHeaderNames("Business process flow status", csvColumnMap));
+            Map(x => x.MicrosoftReferences).Name(GetHeaderNames("Microsoft references", csvColumnMap));
+            Map(x => x.PartnerReferences).Name(GetHeaderNames("Partner references", csvColumnMap));
+            Map(x => x.UpdateComments).Name(GetHeaderNames("Update comments", csvColumnMap));
+            Map(x => x.ApplicationFamily).Name(GetHeaderNames("Application family", csvColumnMap));
+            Map(x => x.Products).Name(GetHeaderNames("Products", csvColumnMap));
+            Map(x => x.SoftwareDevelopmentCompany).Name(GetHeaderNames("Software development company", csvColumnMap));
+            Map(x => x.SoftwareDevelopmentSolutions).Name(GetHeaderNames("Software development solutions", csvColumnMap));
+            Map(x => x.Module).Name(GetHeaderNames("Module", csvColumnMap));
+            Map(x => x.MenuPath).Name(GetHeaderNames("Menu path", csvColumnMap));
+            Map(x => x.MenuItemName).Name(GetHeaderNames("Menu item name", csvColumnMap));
+            Map(x => x.ApqcId).Name(GetHeaderNames("APQC ID", csvColumnMap));
+            Map(x => x.ApqcDescription).Name(GetHeaderNames("APQC description", csvColumnMap));
+            Map(x => x.Scope).Name(GetHeaderNames("Scope", csvColumnMap));
+            Map(x => x.FitGapStatus).Name(GetHeaderNames("Fit Gap Status", csvColumnMap));
+            Map(x => x.GapSolutionApproach).Name(GetHeaderNames("Gap solution approach", csvColumnMap));
+        }
+
+        private static string[] GetHeaderNames(string canonicalName, IReadOnlyDictionary<string, string> csvColumnMap)
+        {
+            if (csvColumnMap.TryGetValue(canonicalName, out string? configuredName)
+                && !string.IsNullOrWhiteSpace(configuredName)
+                && !configuredName.Equals(canonicalName, StringComparison.OrdinalIgnoreCase))
+            {
+                return new[] { configuredName, canonicalName };
+            }
+
+            return new[] { canonicalName };
         }
     }
 }

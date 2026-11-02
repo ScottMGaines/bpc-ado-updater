@@ -15,10 +15,12 @@ internal static class Program
     private const string ArtifactsFolder = "artifacts";
     private const string BackupsFolder = "backups";
     private const string RunLogsFolder = "run-logs";
+    private const string DiagnosticsFilePrefix = "diagnostics-";
     private const string DuplicatesFolder = "duplicates";
 
     private static async Task<int> Main(string[] args)
     {
+        string? diagnosticLogPath = null;
         try
         {
             Options options = Options.Parse(args);
@@ -32,9 +34,24 @@ internal static class Program
             PrintBanner();
             PrintRunMode(options);
             CleanupArtifacts(options);
+            diagnosticLogPath = CreateDiagnosticLog();
+            WriteDiagnostic(diagnosticLogPath, "RunStarted", new
+            {
+                options.DryRun,
+                options.Backup,
+                options.BuildPlan,
+                options.ApplyPlan,
+            });
 
             IConfiguration configRoot = BuildConfiguration(options.ConfigPath);
             AppConfig config = AppConfig.Load(configRoot);
+            WriteDiagnostic(diagnosticLogPath, "ConfigurationLoaded", new
+            {
+                FieldMapCount = config.FieldMap.Count,
+                HasMicrosoftIdMapping = config.FieldMap.ContainsKey("Microsoft ID"),
+                WorkItemTypeMapCount = config.WorkItemTypeMap.Count,
+                IgnoredApplicationCount = config.IgnoredApplications.Count,
+            });
             string pat = config.GetPatOrThrow(out bool usedConfigFallback);
 
             if (usedConfigFallback)
@@ -43,20 +60,104 @@ internal static class Program
             }
 
             var csvLoader = new CsvLoader();
-            IReadOnlyList<CatalogRow> csvRows = Array.Empty<CatalogRow>();
+            CsvLoadResult csvLoadResult = new(Array.Empty<CatalogRow>(), 0, 0, 0, 0);
             await AnsiConsole.Status()
                 .Spinner(Spinner.Known.Dots)
                 .StartAsync("[blue]Loading CSV catalog...[/]", _ =>
                 {
-                    csvRows = csvLoader.Load(options.CsvPath);
+                    csvLoadResult = csvLoader.LoadWithDiagnostics(options.CsvPath, config.CsvColumnMap);
                     return Task.CompletedTask;
                 });
+            IReadOnlyList<CatalogRow> csvRows = csvLoadResult.Rows;
+
+            WriteDiagnostic(diagnosticLogPath, "CsvLoaded", new
+            {
+                csvLoadResult.SourceRecordCount,
+                AcceptedRowCount = csvRows.Count,
+                csvLoadResult.SkippedRowCount,
+                csvLoadResult.MissingMicrosoftIdCount,
+                csvLoadResult.MissingWorkItemTypeCount,
+            });
 
             AnsiConsole.Write(new Panel(
                 $"[bold]CSV Rows[/]: [green]{csvRows.Count}[/]\n" +
                 $"[bold]CSV Path[/]: [grey]{options.CsvPath.EscapeMarkup()}[/]")
                 .Border(BoxBorder.Rounded)
                 .Header("[bold]Input[/]"));
+
+            var applicationFilteredRows = new List<CatalogRow>();
+            var ignoredApplicationCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (CatalogRow row in csvRows)
+            {
+                if (!config.ShouldIgnoreApplication(row.ApplicationFamily))
+                {
+                    applicationFilteredRows.Add(row);
+                    continue;
+                }
+
+                string application = row.ApplicationFamily!.Trim();
+                ignoredApplicationCounts[application] = ignoredApplicationCounts.GetValueOrDefault(application) + 1;
+            }
+
+            int ignoredApplicationRowCount = csvRows.Count - applicationFilteredRows.Count;
+            csvRows = applicationFilteredRows;
+            WriteDiagnostic(diagnosticLogPath, "CsvApplicationsFiltered", new
+            {
+                ComparedRowCount = csvRows.Count,
+                IgnoredRowCount = ignoredApplicationRowCount,
+                IgnoredApplicationCount = ignoredApplicationCounts.Count,
+            });
+
+            if (ignoredApplicationRowCount > 0)
+            {
+                AnsiConsole.MarkupLine($"[yellow]Ignored {ignoredApplicationRowCount} CSV rows matching IgnoredApplications exactly.[/]");
+                var ignoredApplicationsTable = new Table().Border(TableBorder.Rounded);
+                ignoredApplicationsTable.AddColumn("Ignored application family");
+                ignoredApplicationsTable.AddColumn("Ignored rows");
+                foreach ((string application, int count) in ignoredApplicationCounts.OrderBy(x => x.Key, StringComparer.Ordinal))
+                {
+                    ignoredApplicationsTable.AddRow(application.EscapeMarkup(), count.ToString());
+                }
+
+                AnsiConsole.Write(ignoredApplicationsTable);
+            }
+
+            var comparableCsvRows = new List<CatalogRow>();
+            var ignoredWorkItemTypeCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (CatalogRow row in csvRows)
+            {
+                if (config.TryResolveWorkItemType(row.WorkItemType, out _))
+                {
+                    comparableCsvRows.Add(row);
+                    continue;
+                }
+
+                string workItemType = string.IsNullOrWhiteSpace(row.WorkItemType) ? "(blank)" : row.WorkItemType;
+                ignoredWorkItemTypeCounts[workItemType] = ignoredWorkItemTypeCounts.GetValueOrDefault(workItemType) + 1;
+            }
+
+            int ignoredWorkItemTypeRowCount = csvRows.Count - comparableCsvRows.Count;
+            csvRows = comparableCsvRows;
+            WriteDiagnostic(diagnosticLogPath, "CsvWorkItemTypesFiltered", new
+            {
+                ComparedRowCount = csvRows.Count,
+                IgnoredRowCount = ignoredWorkItemTypeRowCount,
+                UnmappedTypeCount = ignoredWorkItemTypeCounts.Count,
+            });
+
+            if (ignoredWorkItemTypeRowCount > 0)
+            {
+                AnsiConsole.MarkupLine($"[yellow]Ignored {ignoredWorkItemTypeRowCount} CSV rows because their work item types are not in WorkItemTypeMap.[/]");
+                var ignoredTypesTable = new Table().Border(TableBorder.Rounded);
+                ignoredTypesTable.AddColumn("Unmapped CSV work item type");
+                ignoredTypesTable.AddColumn("Ignored rows");
+                foreach ((string workItemType, int count) in ignoredWorkItemTypeCounts.OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase))
+                {
+                    ignoredTypesTable.AddRow(workItemType.EscapeMarkup(), count.ToString());
+                }
+
+                AnsiConsole.Write(ignoredTypesTable);
+            }
 
             var adoClient = new AdoClient(config.OrganizationUrl, pat);
             WorkItemIndex index = new()
@@ -90,6 +191,16 @@ internal static class Program
                 .AddRow("Retrieved", $"[green]{index.RetrievedWorkItemCount}[/]")
                 .AddRow("Missing Microsoft ID", $"[yellow]{index.MissingMicrosoftIdCount}[/]")
                 .AddRow("Indexed", $"[green]{index.ByMicrosoftId.Count}[/]"));
+
+            WriteDiagnostic(diagnosticLogPath, "AdoIndexLoaded", new
+            {
+                index.QueriedWorkItemCount,
+                index.RetrievedWorkItemCount,
+                index.MissingMicrosoftIdCount,
+                IndexedCount = index.ByMicrosoftId.Count,
+                DuplicateMicrosoftIdCount = index.DuplicateMicrosoftIds.Count,
+                WarningCount = index.Warnings.Count,
+            });
 
             if (index.ByMicrosoftId.Count == 0)
             {
@@ -131,6 +242,21 @@ internal static class Program
 
             var differ = new Differ();
             ChangeSet changes = differ.Compare(csvRows, index.ByMicrosoftId, config.FieldMap, config.DefaultsWhenCsvNull);
+            Dictionary<string, int> updateFieldCounts = changes.Changes
+                .Where(x => x.Kind == ChangeKind.Update)
+                .SelectMany(x => x.Deltas)
+                .GroupBy(x => x.CsvFieldName, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(x => x.Key, x => x.Count(), StringComparer.OrdinalIgnoreCase);
+            WriteDiagnostic(diagnosticLogPath, "ComparisonCompleted", new
+            {
+                CsvRowCount = csvRows.Count,
+                AdoIndexedCount = index.ByMicrosoftId.Count,
+                AddCount = changes.Changes.Count(x => x.Kind == ChangeKind.Add),
+                UpdateCount = changes.Changes.Count(x => x.Kind == ChangeKind.Update),
+                UnchangedCount = changes.Changes.Count(x => x.Kind == ChangeKind.Unchanged),
+                InformationalCount = changes.InformationalMessages.Count,
+                UpdateFieldCounts = updateFieldCounts,
+            });
 
             var reviewer = new ConsoleReviewer();
             reviewer.PrintSummary(changes);
@@ -150,9 +276,10 @@ internal static class Program
             }
             else
             {
-                MainMenuResult mainMenuResult = RunMainMenu(changes, index.DuplicateMicrosoftIds, duplicateReportSummary, reviewer);
+                MainMenuResult mainMenuResult = RunMainMenu(changes, index.DuplicateMicrosoftIds, duplicateReportSummary, reviewer, config);
                 if (mainMenuResult == MainMenuResult.Quit)
                 {
+                    WriteDiagnostic(diagnosticLogPath, "ReviewExited", new { Outcome = "QuitBeforeApply" });
                     AnsiConsole.MarkupLine("[yellow]Exited from main menu. No updates were applied.[/]");
                     return 0;
                 }
@@ -248,6 +375,12 @@ internal static class Program
             Directory.CreateDirectory(runLogDirectory);
             string runLogPath = Path.Combine(runLogDirectory, runLogFile);
             await File.WriteAllTextAsync(runLogPath, JsonSerializer.Serialize(runLog, new JsonSerializerOptions { WriteIndented = true }));
+            WriteDiagnostic(diagnosticLogPath, "RunCompleted", new
+            {
+                ApprovedChangeCount = approved,
+                SucceededCount = runLog.Operations.Count(x => x.Success),
+                FailedCount = runLog.Operations.Count(x => !x.Success && x.Approved),
+            });
 
             int succeeded = runLog.Operations.Count(x => x.Success);
             int failed = runLog.Operations.Count(x => !x.Success && x.Approved);
@@ -262,14 +395,49 @@ internal static class Program
         }
         catch (ArgumentException ex)
         {
+            WriteDiagnostic(diagnosticLogPath, "RunFailed", new { ExceptionType = ex.GetType().FullName });
             AnsiConsole.MarkupLine($"[red]Error:[/] {ex.Message.EscapeMarkup()}");
             PrintHelp();
             return 1;
         }
         catch (Exception ex)
         {
+            WriteDiagnostic(diagnosticLogPath, "RunFailed", new { ExceptionType = ex.GetType().FullName });
             AnsiConsole.MarkupLine($"[red]Error:[/] {ex.Message.EscapeMarkup()}");
             return 1;
+        }
+    }
+
+    private static string CreateDiagnosticLog()
+    {
+        string directory = Path.Combine(Environment.CurrentDirectory, ArtifactsFolder, RunLogsFolder);
+        Directory.CreateDirectory(directory);
+        string fileName = $"{DiagnosticsFilePrefix}{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}.jsonl";
+        return Path.Combine(directory, fileName);
+    }
+
+    private static void WriteDiagnostic(string? path, string stage, object details)
+    {
+        if (path is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var entry = new
+            {
+                TimestampUtc = DateTimeOffset.UtcNow,
+                Stage = stage,
+                Details = details,
+            };
+            File.AppendAllText(path, JsonSerializer.Serialize(entry) + Environment.NewLine);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
     }
 
@@ -304,7 +472,8 @@ internal static class Program
         ChangeSet changes,
         IReadOnlyDictionary<string, List<DuplicateWorkItemInfo>> duplicateItems,
         string? duplicateReportSummary,
-        ConsoleReviewer reviewer)
+        ConsoleReviewer reviewer,
+        AppConfig config)
     {
         int addCount = changes.Changes.Count(x => x.Kind == ChangeKind.Add);
         int updateCount = changes.Changes.Count(x => x.Kind == ChangeKind.Update);
@@ -359,7 +528,7 @@ internal static class Program
 
             if (choice == reviewAddsAction)
             {
-                reviewer.Review(changes, x => x.Kind == ChangeKind.Add, "Adds");
+                reviewer.Review(Applier.OrderAdds(changes.Adds, config), "Adds");
                 addsComplete = true;
                 continue;
             }
